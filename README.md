@@ -180,12 +180,3 @@ On vanilla 1.7.10 everything that arrived in the last 50 ms is applied at once a
 tick boundary: entity position targets, velocity, teleports, block changes. Between
 boundaries nothing new happens. That gives the characteristic 1.7 feel where an
 opponent's knockback or a pearl "pops" a moment after it should.
-
-With HitFix each packet is applied on the frame it arrives. Entity interpolation
-targets update as soon as the server sends them, so other players track their real
-position more closely. Knockback you receive is applied on the same frame, so your own
-movement reacts without a hitch. Teleports and pearls land where the server put you
-instead of one tick later.
-
-The tick rate is unchanged. Physics, block updates and your own outbound packets still
-run at 20 Hz. HitFix only changes when inbound packets are consumed.
