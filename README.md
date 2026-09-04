@@ -1,19 +1,47 @@
 # HitFix
 
-Per-frame packet processing for Minecraft 1.7.10. A Forge mod that gives 1.7.10 the
-same inbound packet timing 1.8.9 has: hits, knockback, teleports and pearls are
-applied on the next rendered frame instead of waiting for the next 50 ms game tick.
+A Forge mod that gives Minecraft 1.7.10 the inbound packet timing of 1.8.9.
 
-## The problem
+1.7.10 only processes packets from the server once per game tick. 1.8.9 processes them
+on every rendered frame. HitFix makes 1.7.10 do what 1.8.9 does, using the method the
+1.7.10 client already has, and nothing else.
 
-Every client receives packets on a Netty thread. Game state can only be touched from
-the main thread, so each version has to hand packets over. 1.7.10 and 1.8.9 do that
-differently, and the difference is a whole game tick of latency.
+## What you notice
 
-### 1.7.10: queue, then drain once per tick
+Everything the server tells you shows up on screen sooner. You see your hit land on
+someone up to 50 ms earlier than on vanilla 1.7.10. A pearl moves your camera up to
+50 ms earlier. Hit flashes, particles, health, other players' movement: all of it
+reaches your screen on the frame it arrived instead of on the next tick.
 
-Inbound packets go into a queue. Only keep-alives and a few others marked
-`hasPriority()` are handled immediately.
+The game does not run faster. Ticks still happen every 50 ms. HitFix uses the time
+between ticks to process packets that would otherwise sit in a queue, so the frames
+you render in that gap use current information instead of information from the last
+tick.
+
+## The timeline
+
+```
+1.7.10
+  Tick A  (0 ms)   packets processed
+                   ...... 50 ms gap, queue fills, nothing applied ......
+  Tick B  (50 ms)  packets processed
+
+1.8.9
+  Tick A  (0 ms)   packets processed
+  frame            packets processed
+  frame            packets processed
+  frame            packets processed
+  Tick B  (50 ms)  packets processed
+```
+
+That 50 ms gap is the whole difference. It is also why a 1.7.10 client answers
+transaction packets in 50 ms steps, while a 1.8.9 client answers them on the frame
+they arrive, close to keep-alive speed.
+
+## 1.7.10: queue, drain once per tick
+
+Inbound packets go into a queue. Only the few marked `hasPriority()`, such as
+keep-alives, are handled immediately.
 
 ```java
 // net.minecraft.network.NetworkManager  (MCP 1.7.10)
@@ -32,7 +60,7 @@ public void processReceivedPackets() {
     if (this.netHandler != null) {
         for (int i = 1000; !this.receivedPacketsQueue.isEmpty() && i >= 0; --i) {
             Packet packet = (Packet) this.receivedPacketsQueue.poll();
-            packet.processPacket(this.netHandler);   // entity moves, velocity, teleports applied here
+            packet.processPacket(this.netHandler);   // applied here
         }
         this.netHandler.onNetworkTick();
     }
@@ -40,7 +68,7 @@ public void processReceivedPackets() {
 }
 ```
 
-The only caller of `processReceivedPackets()` while in a world is the world tick:
+The only caller while you are in a world is the world tick:
 
 ```java
 // net.minecraft.client.multiplayer.WorldClient  (MCP 1.7.10)
@@ -53,34 +81,30 @@ public void tick() {
 }
 ```
 
-and the world tick runs 20 times per second from `Minecraft.runTick()`, at the very
-end of the tick:
+and the world tick runs at the end of `runTick`, after entities have already been
+updated for that tick:
 
 ```java
 // net.minecraft.client.Minecraft  (MCP 1.7.10)
 public void runTick() {
     ...
-    this.mcProfiler.endStartSection("pick");
-    this.entityRenderer.getMouseOver(1.0F);
-    ...
     if (!this.isGamePaused) {
-        this.theWorld.updateEntities();
+        this.theWorld.updateEntities();           // physics for this tick
     }
     ...
     if (!this.isGamePaused) {
-        this.theWorld.tick();                         // <- packets drained HERE, every 50 ms
+        this.theWorld.tick();                     // packets drained here, every 50 ms
     }
     ...
 }
 ```
 
-So a packet that arrives 1 ms after a tick sits in the queue for 49 ms. On average a
-packet waits 25 ms, and every packet from the last 50 ms is applied in one burst.
+A packet that arrives just after a tick sits in the queue for almost 50 ms. On average
+it waits 25 ms, and everything from the last 50 ms is applied in one burst.
 
-### 1.8.9: process immediately, hop to the main thread, drain every frame
+## 1.8.9: process immediately, hop to the main thread, drain every frame
 
-1.8.9 no longer queues in `NetworkManager`. The packet is processed right away on the
-Netty thread:
+1.8.9 has no queue in `NetworkManager`. The packet is handled as soon as it is read:
 
 ```java
 // net.minecraft.network.NetworkManager  (MCP 1.8.9)
@@ -89,14 +113,14 @@ protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exc
         try {
             packet.processPacket(this.packetListener);
         } catch (ThreadQuickExitException e) {
-            // handler re-scheduled itself onto the main thread, nothing to do
+            // handler re-scheduled itself onto the main thread
         }
     }
 }
 ```
 
-Every handler in `NetHandlerPlayClient` starts with a thread check. If it is not on the
-main thread it schedules itself there and bails out:
+Every handler starts with a thread check. Off the main thread it schedules itself and
+bails out:
 
 ```java
 // net.minecraft.network.PacketThreadUtil  (MCP 1.8.9)
@@ -122,8 +146,8 @@ public void handleEntityVelocity(S12PacketEntityVelocity packetIn) {
 }
 ```
 
-And the scheduled tasks are drained at the top of the game loop, which runs once per
-rendered frame, before ticks and before rendering:
+The scheduled tasks are drained at the top of the game loop, once per rendered frame,
+before any tick runs on that frame:
 
 ```java
 // net.minecraft.client.Minecraft  (MCP 1.8.9)
@@ -131,7 +155,7 @@ private void runGameLoop() throws IOException {
     ...
     synchronized (this.scheduledTasks) {
         while (!this.scheduledTasks.isEmpty()) {
-            Util.runTask((FutureTask) this.scheduledTasks.poll(), logger);   // <- every FRAME
+            Util.runTask((FutureTask) this.scheduledTasks.poll(), logger);   // every frame
         }
     }
     ...
@@ -143,20 +167,26 @@ private void runGameLoop() throws IOException {
 }
 ```
 
-A packet arriving between frames waits for the next frame, not the next tick. At 144
-FPS that is about 3.5 ms on average instead of 25 ms.
+A packet waits for the next frame, not the next tick. At 144 FPS that is about 3.5 ms
+on average instead of 25 ms.
 
 ## What HitFix does
 
-1.7.10 already has the drain method. It is just never called more than once per tick.
-HitFix calls it once per frame from Forge's render tick event, which fires on the main
-thread at the start of the render pass, the same place 1.8.9 drains its task queue.
+It calls the 1.7.10 drain method where 1.8.9 drains: at the start of every game loop
+pass before the tick, and on every frame in between.
 
 ```java
 @SubscribeEvent
-public void onRenderTick(TickEvent.RenderTickEvent event) {
-    if (event.phase != TickEvent.Phase.START || !enabled) return;
+public void onClientTick(TickEvent.ClientTickEvent event) {
+    if (event.phase == TickEvent.Phase.START) drain();   // before this tick's physics
+}
 
+@SubscribeEvent
+public void onRenderTick(TickEvent.RenderTickEvent event) {
+    if (event.phase == TickEvent.Phase.START) drain();   // every frame between ticks
+}
+
+private static void drain() {
     Minecraft mc = Minecraft.getMinecraft();
     if (mc.theWorld == null || mc.thePlayer == null) return;
     if (mc.isSingleplayer() && mc.currentScreen != null && mc.currentScreen.doesGuiPauseGame()) return;
@@ -171,18 +201,19 @@ public void onRenderTick(TickEvent.RenderTickEvent event) {
 }
 ```
 
-No packets are modified, delayed or generated. No mixins, no reflection, no
-bytecode patches. The vanilla per-tick drain still runs and finds an empty queue.
+That is the whole mod. No packet is modified, delayed, dropped or added. No mixins,
+no reflection, no bytecode patches. The vanilla end-of-tick drain still runs and finds
+an empty queue.
 
-### Why it feels smoother
+### Not a cheat
 
-Vanilla 1.7.10 applies every packet from the last 50 ms in one burst at the tick
-boundary. Between boundaries the client learns nothing new.
+HitFix sends nothing a 1.8.9 client does not send and applies nothing a 1.8.9 client
+does not apply. Tick rate, physics, reach and outbound packets are unchanged. The
+server sees a 1.7.10 client that responds the way every 1.8.9 client already does.
 
-HitFix applies each packet on the frame it arrives, the same way 1.8.9 does. Your
-own knockback, teleports and pearls are applied as soon as they reach the client
-instead of waiting for the next tick.
+The one effect beyond rendering: because packets are applied before the next tick's
+physics instead of after, an incoming velocity or teleport for your own player is
+integrated on the next tick rather than the one after. That is exactly 1.8.9's
+behaviour, and it is the reason the drain also runs at tick start and not only per
+frame.
 
-Nothing is sent that a 1.8.9 client would not send. Tick rate, physics, reach
-and outbound packets are unchanged. This is not a cheat. It only changes when
-inbound packets are consumed.

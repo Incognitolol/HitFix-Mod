@@ -1,17 +1,24 @@
 /*
- * HitFix - per-frame packet flush for Minecraft 1.7.10 (Forge)
+ * HitFix - 1.8.9 inbound packet timing for Minecraft 1.7.10 (Forge)
  *
- * Vanilla 1.7.10 NetworkManager.channelRead0 puts every inbound packet that is
- * not hasPriority() into receivedPacketsQueue. That queue is only drained by
- * NetworkManager.processReceivedPackets(), which WorldClient.tick() calls once
- * per game tick, every 50 ms. A hit, knockback, teleport or pearl therefore
- * waits up to a full tick, 25 ms on average, before the client applies it.
+ * 1.7.10: NetworkManager.channelRead0 puts every inbound packet that is not
+ * hasPriority() into receivedPacketsQueue. The queue is only drained by
+ * NetworkManager.processReceivedPackets(), called from WorldClient.tick() at
+ * the END of Minecraft.runTick(), after updateEntities(). So a packet waits for
+ * the next 50 ms tick, and even then it lands after that tick's physics, so it
+ * takes effect one tick later still.
  *
- * 1.8 drains its equivalent (Minecraft.scheduledTasks) at the top of
- * runGameLoop(), once per rendered frame. HitFix does the same on 1.7.10: it
- * calls processReceivedPackets() from Forge's RenderTickEvent (START), which
- * fires once per frame on the client thread, the only thread allowed to touch
- * game state.
+ * 1.8.9: packet handlers hop to the main thread through Minecraft.scheduledTasks,
+ * which runGameLoop() drains at the TOP of every rendered frame, before runTick().
+ * Every packet is applied on the frame it arrives and before the next tick's
+ * physics.
+ *
+ * HitFix reproduces the 1.8.9 order on 1.7.10 with the drain method vanilla
+ * already has:
+ *   ClientTickEvent START  -> processReceivedPackets() before this tick's physics
+ *   RenderTickEvent START  -> processReceivedPackets() on every frame between ticks
+ * The vanilla end-of-tick drain still runs and finds an empty queue.
+
  */
 package club.antiskid.incognito.hitfix;
 
@@ -46,24 +53,20 @@ public class HitFix {
 
     @SubscribeEvent
     public void onClientTick(TickEvent.ClientTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) return;
-
-        Minecraft mc = Minecraft.getMinecraft();
-        NetHandlerPlayClient handler = mc.getNetHandler();
-        if (handler == null || mc.thePlayer == null) {
-            announced = null;
+        if (event.phase == TickEvent.Phase.START) {
+            drain();
             return;
         }
-        if (handler == announced) return;
-        announced = handler;
-
-        handler.addToSendQueue(new C17PacketCustomPayload("REGISTER", CHANNEL.getBytes(StandardCharsets.UTF_8)));
-        handler.addToSendQueue(new C17PacketCustomPayload(CHANNEL, ("HitFix/" + VERSION).getBytes(StandardCharsets.UTF_8)));
+        announce();
     }
 
     @SubscribeEvent
     public void onRenderTick(TickEvent.RenderTickEvent event) {
-        if (event.phase != TickEvent.Phase.START || !enabled) return;
+        if (event.phase == TickEvent.Phase.START) drain();
+    }
+
+    private static void drain() {
+        if (!enabled) return;
 
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.theWorld == null || mc.thePlayer == null) return;
@@ -76,5 +79,19 @@ public class HitFix {
         if (net == null || !net.isChannelOpen()) return;
 
         net.processReceivedPackets();
+    }
+
+    private void announce() {
+        Minecraft mc = Minecraft.getMinecraft();
+        NetHandlerPlayClient handler = mc.getNetHandler();
+        if (handler == null || mc.thePlayer == null) {
+            announced = null;
+            return;
+        }
+        if (handler == announced) return;
+        announced = handler;
+
+        handler.addToSendQueue(new C17PacketCustomPayload("REGISTER", CHANNEL.getBytes(StandardCharsets.UTF_8)));
+        handler.addToSendQueue(new C17PacketCustomPayload(CHANNEL, ("HitFix/" + VERSION).getBytes(StandardCharsets.UTF_8)));
     }
 }
