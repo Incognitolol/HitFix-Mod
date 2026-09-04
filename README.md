@@ -174,9 +174,15 @@ public void onRenderTick(TickEvent.RenderTickEvent event) {
 No packets are modified, delayed or generated. No mixins, no reflection, no
 bytecode patches. The vanilla per-tick drain still runs and finds an empty queue.
 
-### Why it is smoother
+### Why it feels smoother
 
-On vanilla 1.7.10 everything that arrived in the last 50 ms is applied at once at the
-tick boundary: entity position targets, velocity, teleports, block changes. Between
-boundaries nothing new happens. That gives the characteristic 1.7 feel where an
-opponent's knockback or a pearl "pops" a moment after it should.
+Vanilla 1.7.10 applies every packet from the last 50 ms in one burst at the tick
+boundary. Between boundaries the client learns nothing new.
+
+HitFix applies each packet on the frame it arrives, the same way 1.8.9 does. Your
+own knockback, teleports and pearls are applied as soon as they reach the client
+instead of waiting for the next tick.
+
+Nothing is sent that a 1.8.9 client would not send. Tick rate, physics, reach
+and outbound packets are unchanged. This is not a cheat. It only changes when
+inbound packets are consumed.
