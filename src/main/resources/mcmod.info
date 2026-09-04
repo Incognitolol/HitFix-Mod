@@ -1,0 +1,15 @@
+[
+  {
+    "modid": "hitfix",
+    "name": "HitFix",
+    "description": "Applies incoming packets every rendered frame instead of once per game tick, giving 1.7.10 the 1.8 per-frame packet behaviour.",
+    "version": "1.0",
+    "mcversion": "1.7.10",
+    "url": "https://antiskid.club",
+    "authorList": ["incognito"],
+    "credits": "",
+    "logoFile": "",
+    "screenshots": [],
+    "dependencies": []
+  }
+]
