@@ -1,3 +1,6 @@
+
+Shoutout @dewgs https://github.com/dewgs
+
 # HitFix
 
 A Forge mod that gives Minecraft 1.7.10 the inbound packet timing of 1.8.9.
